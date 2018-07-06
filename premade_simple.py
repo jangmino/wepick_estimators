@@ -7,7 +7,7 @@ import sys
 import os
 import pathlib
 
-#tf.logging.set_verbosity(tf.logging.INFO)
+tf.logging.set_verbosity(tf.logging.INFO)
 
 def load_train_data(D=100):
   base_header = ["u", "ts", "v", "slot", "label"]
@@ -74,7 +74,11 @@ def load_eval_data(D=100):
 
 def main(_):
   train_x, train_y, x_columns = load_train_data(FLAGS.emb_dim)
+  # eval_x = train_x.copy()
+  # eval_y = train_y.copy()
   eval_x, eval_y = load_eval_data(FLAGS.emb_dim)
+  # train_x = eval_x.copy()
+  # train_y = eval_y.copy()
 
   train_input_fn = tf.estimator.inputs.numpy_input_fn(
       x={"x":train_x},
@@ -92,7 +96,7 @@ def main(_):
     shuffle=False
   )
 
-  serving_feature_spec = {"x": tf.FixedLenFeature(dtype=tf.float32, shape=[FLAGS.batch_size*2])}
+  serving_feature_spec = {"x": tf.FixedLenFeature(dtype=tf.float32, shape=[FLAGS.emb_dim*2])}
   serving_input_receiver_fn = (
     tf.estimator.export.build_parsing_serving_input_receiver_fn(
       serving_feature_spec))
@@ -108,14 +112,17 @@ def main(_):
   pathlib.Path(e_path).mkdir(parents=True, exist_ok=True)
 
   train_spec = tf.estimator.TrainSpec(input_fn = train_input_fn, max_steps=20000)
-  eval_spec = tf.estimator.EvalSpec(input_fn=eval_input_fn, steps=200, exporters=exporter, start_delay_secs=0,
-  throttle_secs=1)
+  eval_spec = tf.estimator.EvalSpec(input_fn=eval_input_fn, exporters=exporter, start_delay_secs=0,
+        throttle_secs=1, steps=None)
 
   estimator = tf.estimator.DNNClassifier(
     config=tf.estimator.RunConfig(
-      model_dir=FLAGS.model, save_summary_steps=100),
-    feature_columns=[tf.feature_column.numeric_column(key='x', shape=[200])],
-    hidden_units=[32, 32], n_classes=2)
+      model_dir=FLAGS.model, save_summary_steps=200),
+    feature_columns=[tf.feature_column.numeric_column(key='x', shape=[FLAGS.emb_dim*2])],
+    optimizer=tf.train.AdamOptimizer(),
+    dropout=0.2,
+    activation_fn=tf.sigmoid,
+    hidden_units=[64, 32, 8], n_classes=2)
 
   tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
 
@@ -137,7 +144,7 @@ if __name__ == "__main__":
   parser.add_argument(
       "--model",
       type=str,
-      default="./my_model",
+      default="./model_0704_odd",
       help="path of the estimator's model")
 
   parser.add_argument(
@@ -149,7 +156,7 @@ if __name__ == "__main__":
   parser.add_argument(
       "--batch_size",
       type=int,
-      default=512,
+      default=256,
       help="mini-batch size")
 
   FLAGS, unparsed = parser.parse_known_args()

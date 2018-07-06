@@ -11,7 +11,7 @@ import tensorflow as tf
 from operator import itemgetter
 
 
-def es_search_dids_for_user(es, user_id, day_limit, gte_slot=1):
+def es_search_dids_for_user(es, user_id, day_limit, gte_slot=1, ignore_consecutives=False):
   """
   user_id의 모든 v 가져오기
   day_limit 이전 것만 가져온다.
@@ -42,8 +42,11 @@ def es_search_dids_for_user(es, user_id, day_limit, gte_slot=1):
   if res['hits']['total'] > 0:
     until_dt = pd.to_datetime(day_limit).to_pydatetime()
     filtered = []
+    prev_v = None
     for hit in res['hits']['hits']:
-      filtered.append((hit['_source']['v'], hit['_source']['rgtime'], hit['_source']['slot']))
+      if ignore_consecutives == False or (prev_v is not None and prev_v != hit['_source']['v']):
+        filtered.append((hit['_source']['v'], hit['_source']['rgtime'], hit['_source']['slot']))
+      prev_v = hit['_source']['v']
     return set(map(lambda x: x[0], filtered)), filtered
   return None, None
 

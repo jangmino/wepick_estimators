@@ -6,6 +6,7 @@ import shutil
 import numpy as np
 import csv
 import pickle
+import os
 
 MULTI_THREADING = False
 DATA_PATH = r'd:\WMIND\temp\train_data_cnn_small.csv'
@@ -65,16 +66,19 @@ def create_example(deal_word2vec_bytes, row, verify=False):
   :return:
   """
   data = dict(zip(HEADER, row))
+
+  reversed_dids = list(reversed(data['seq'].split(' ')))
   context = tf.train.Features(feature={
     'uid': _int64_feature(int(data['uid'])),
-    'ts': _bytes_feature(data['ts'].encode('utf-8')),
+    #'ts': _bytes_feature(data['ts'].encode('utf-8')),
+    'sl': _int64_feature(len(reversed_dids)),
     'label': _int64_feature(int(data['label']))
     }
   )
 
   vecs = []
   dids = []
-  for did_ in reversed(data['seq'].split(' ')):
+  for did_ in reversed_dids:
     did = int(did_)
     if did in deal_word2vec_bytes:
       vec = deal_word2vec_bytes[did]
@@ -91,7 +95,7 @@ def create_example(deal_word2vec_bytes, row, verify=False):
                                                                                     feature_lists=feature_lists)
 
 
-def create_tfrecords_file(input_csv_file, deal_to_w2vec_file=r'd:\WMIND\temp\deal_to_w2vec.pkl'):
+def create_tfrecords_file(input_csv_file, deal_to_w2vec_file=r'd:\WMIND\temp\deal_to_w2vec.pkl', out_header='data', num_in_one_file=320000):
   with open(deal_to_w2vec_file, 'rb') as f:
     deal_word2vec_dic = pickle.load(f)
 
@@ -99,17 +103,22 @@ def create_tfrecords_file(input_csv_file, deal_to_w2vec_file=r'd:\WMIND\temp\dea
   for did, vec in deal_word2vec_dic.items():
     deal_word2vec_bytes[did] = vec.tobytes()
 
-  output_tfrecord_file = input_csv_file.replace("csv", "tfrecords")
-  writer = tf.python_io.TFRecordWriter(output_tfrecord_file)
-  raw_datas = []
+  writer = None
+  num_data_files = 0
   for i, row in enumerate(creat_csv_iterator(input_csv_file)):
+    if writer is None or i % num_in_one_file == 0:
+      if writer: writer.close()
+      num_data_files += 1
+      data_path = os.path.join(out_header, 'data-{:04d}.tfrecords'.format(num_data_files))
+      writer = tf.python_io.TFRecordWriter(data_path)
+      print("...creating {}.".format(data_path))
     example = create_example(deal_word2vec_bytes, row)
     content = example.SerializeToString()
     writer.write(content)
-  writer.close()
+  if writer: writer.close()
 
 
-def parse_tf_example(example_proto):
+def parse_tf_example(example_proto, max_history_len=None):
   """
   w2vecs를
   - tf.decode_raw를 적용하여, [H, D] 로 reshape
@@ -119,7 +128,8 @@ def parse_tf_example(example_proto):
   # Define features
   context_features = {
     'uid': tf.FixedLenFeature([], dtype=tf.int64),
-    'ts': tf.FixedLenFeature([], dtype=tf.string),
+#    'ts': tf.FixedLenFeature([], dtype=tf.string),
+    'sl': tf.FixedLenFeature([], dtype=tf.int64),
     'label': tf.FixedLenFeature([], dtype=tf.int64)
   }
   sequence_features = {
@@ -134,9 +144,17 @@ def parse_tf_example(example_proto):
     sequence_features=sequence_features)
 
   data = {}
-  data['w2vecs'] = tf.reshape( tf.decode_raw(sequence_data['w2vecs'], tf.float32), [-1, DIM])
+#  data['w2vecs'] = tf.reshape( tf.decode_raw(sequence_data['w2vecs'], tf.float32), [-1, DIM])
+  x_ = tf.reshape(tf.decode_raw(sequence_data['w2vecs'], tf.float32), [-1, DIM])
+  if max_history_len is not None:
+    padding = tf.constant([[0,max_history_len], [0, 0]])
+    x_ = tf.pad(x_, padding)
+    x_ = tf.slice(x_, [0,0], [max_history_len, -1])
+  data['w2vecs'] = x_
+
   data['dids'] = sequence_data.pop('dids')
   data['uid'] = context_data.pop('uid')
+  data['sl'] = context_data.pop('sl')
   # data['ts'] = context_data.pop('ts')
   target = context_data.pop('label')
 
@@ -144,6 +162,7 @@ def parse_tf_example(example_proto):
 
 
 def tfrecords_input_fn(files_name_pattern, mode=tf.estimator.ModeKeys.EVAL,
+             max_history_len=None,
              num_epochs=1,
              batch_size=200):
   """
@@ -172,6 +191,8 @@ def tfrecords_input_fn(files_name_pattern, mode=tf.estimator.ModeKeys.EVAL,
   print("Mode: {}".format(mode))
   print("Thread Count: {}".format(num_threads))
   print("Shuffle: {}".format(shuffle))
+  if max_history_len is not None:
+    print("max_history_len: {}".format(max_history_len))
   print("================")
   print("")
 
@@ -181,8 +202,8 @@ def tfrecords_input_fn(files_name_pattern, mode=tf.estimator.ModeKeys.EVAL,
   if shuffle:
     dataset = dataset.shuffle(buffer_size)
 
-  dataset = dataset.map(lambda tf_example: parse_tf_example(tf_example))
-  dataset = dataset.padded_batch(batch_size, padded_shapes=({'uid':[], 'w2vecs':[None, DIM], 'dids':[None]}, []) )
+  dataset = dataset.map(lambda tf_example: parse_tf_example(tf_example,max_history_len))
+  dataset = dataset.padded_batch(batch_size, padded_shapes=({'uid':[], 'w2vecs':[None, DIM], 'dids':[None], 'sl':[]}, []) )
 
   dataset = dataset.repeat(num_epochs)
   dataset = dataset.prefetch(buffer_size)
@@ -195,8 +216,11 @@ def tfrecords_input_fn(files_name_pattern, mode=tf.estimator.ModeKeys.EVAL,
 
 if __name__ == "__main__":
   tf.enable_eager_execution()
-  create_tfrecords_file(r'd:\WMIND\temp\train_data_cnn_small.csv')
+  # create_tfrecords_file(r'd:\WMIND\temp\train_data_cnn.csv', out_header=r'd:\WMIND\temp\train_data')
+  # create_tfrecords_file(r'd:\WMIND\temp\test_data_cnn.csv', out_header=r'd:\WMIND\temp\test_data')
 
-  features_op, labels_op = tfrecords_input_fn(r'd:\WMIND\temp\train_data_cnn_small.tfrecords', mode=tf.estimator.ModeKeys.EVAL, batch_size=4)
-
+  features_op, labels_op = tfrecords_input_fn(r'd:\WMIND\temp\train_data_cnn_small.tfrecords', mode=tf.estimator.ModeKeys.TRAIN, batch_size=1)
+  # features_op, labels_op = tfrecords_input_fn(r'c:\Users\wmp\TensorFlow\wepick_estimators\data\data-*.tfrecords',
+  #                                             mode=tf.estimator.ModeKeys.EVAL, batch_size=8)
+  #
   print(features_op, labels_op)
